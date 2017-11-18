@@ -102,17 +102,22 @@ class spatialtree(object):
             kwargs['samples_rp']    = 10
             pass
 
+        if "leafnumvec" not in kwargs:
+            kwargs["leafnumvec"] = [0]
+            
 
         # All information is now contained in kwargs, we may proceed
         
         # Store bookkeeping information
-        self.__indices      = set(kwargs['indices'])
-        self.__splitRule    = kwargs['rule']
-        self.__spill        = kwargs['spill']
-        self.__children     = None
-        self.__w            = None
-        self.__thresholds   = None
-        self.__keyvalue     = isinstance(data, dict)
+        self.__indices       = set(kwargs['indices'])
+        self.__splitRule     = kwargs['rule']
+        self.__spill         = kwargs['spill']
+        self.__children      = None
+        self.__w             = None
+        self.__thresholds    = None
+        self.__keyvalue      = isinstance(data, dict)
+        self.__leafnum       = None 
+        self.__leafnumvec    = kwargs["leafnumvec"]
 
         # Compute the dimensionality of the data
         # This way supports opaque key-value stores as well as numpy arrays
@@ -123,7 +128,81 @@ class spatialtree(object):
         # Split the new node
         self.__height       = self.__split(data, **kwargs)
 
+        #self.__build        = self.__build(data, **kwargs)
+
+
         pass
+
+
+    def __build(self, data, **kwargs):
+        '''
+        Recursive algorithm to build a tree by splitting data.
+
+        Not to be called externally.
+        '''
+
+        # First, find the split rule
+        if kwargs['rule'] == 'pca':
+            splitF  =   self.__PCA
+        elif kwargs['rule'] == 'kd':
+            splitF  =   self.__KD
+        elif kwargs['rule'] == '2-means':
+            splitF  =   self.__2means
+        elif kwargs['rule'] == 'rp':
+            splitF  =   self.__RP
+        else:
+            raise ValueError('Unsupported split rule: %s' % kwargs['rule'])
+
+        # If the height is 0, or the set is too small, then we don't need to split
+        if len(kwargs['indices']) < kwargs['min_items']:
+            
+            ################
+            # Ben's Change #
+            ## - since this means we have a leaf we are going to also do the 
+            ##   following to label leafs when created
+            ## * also why are we magically controling for height = 0 -> I don't like this set up
+
+            self.__leafnum = numpy.max(numpy.array(self.__leafnumvec)) + 1
+            self.__leafnumvec.append(self.__leafnum)
+
+            return 0
+
+
+        # Compute the split direction 
+        self.__w = splitF(data, **kwargs)
+
+        # Project onto split direction
+        wx = {}
+        for i in self.__indices:
+            wx[i] = numpy.dot(self.__w, data[i])
+            pass
+
+        # Compute the bias points
+        self.__thresholds = scipy.stats.mstats.mquantiles(numpy.array([x for x in wx.values()]), [0.5 - self.__spill/2, 0.5 + self.__spill/2])
+
+        # Partition the data
+        left_set    = set()
+        right_set   = set()
+
+        for i, val in wx.items():
+            if val >= self.__thresholds[0]:
+                right_set.add(i)
+            if val < self.__thresholds[-1]:
+                left_set.add(i)
+            pass
+        del wx  # Don't need scores anymore
+
+        # Construct the children
+        self.__children     = [ None ] * 2
+
+        kwargs['indices']   = left_set
+        self.__children[0]  = spatialtree(data, **kwargs)
+
+        kwargs['indices']   = right_set
+        self.__children[1]  = spatialtree(data, **kwargs)
+
+        # Done
+
 
     def __split(self, data, **kwargs):
         '''
@@ -148,8 +227,19 @@ class spatialtree(object):
             raise ValueError('spatialtree.split() called with height<0')
 
         # If the height is 0, or the set is too small, then we don't need to split
-        if kwargs['height'] == 0 or len(kwargs['indices']) < kwargs['min_items']:
-            return  0
+        if len(kwargs['indices']) < kwargs['min_items']:
+            
+            ################
+            # Ben's Change #
+            ## - since this means we have a leaf we are going to also do the 
+            ##   following to label leafs when created
+            ## * also why are we magically controling for height = 0 -> I don't like this set up
+
+            self.__leafnum = numpy.max(numpy.array(self.__leafnumvec)) + 1
+            self.__leafnumvec.append(self.__leafnum)
+
+            return 0
+
 
         # Compute the split direction 
         self.__w = splitF(data, **kwargs)
@@ -161,13 +251,13 @@ class spatialtree(object):
             pass
 
         # Compute the bias points
-        self.__thresholds = scipy.stats.mstats.mquantiles(wx.values(), [0.5 - self.__spill/2, 0.5 + self.__spill/2])
+        self.__thresholds = scipy.stats.mstats.mquantiles(numpy.array([x for x in wx.values()]), [0.5 - self.__spill/2, 0.5 + self.__spill/2])
 
         # Partition the data
         left_set    = set()
         right_set   = set()
 
-        for (i, val) in wx.iteritems():
+        for i, val in wx.items():
             if val >= self.__thresholds[0]:
                 right_set.add(i)
             if val < self.__thresholds[-1]:
@@ -177,7 +267,6 @@ class spatialtree(object):
 
         # Construct the children
         self.__children     = [ None ] * 2
-        kwargs['height']    -= 1
 
         kwargs['indices']   = left_set
         self.__children[0]  = spatialtree(data, **kwargs)
@@ -207,9 +296,8 @@ class spatialtree(object):
 
         left_set    = {}
         right_set   = {}
-        for (key, vector) in D.iteritems():
+        for key, vector in D.items():
             wx = numpy.dot(self.__w, vector)
-
             if wx >= self.__thresholds[0]:
                 right_set[key]  = vector
             if wx < self.__thresholds[-1]:
@@ -226,7 +314,7 @@ class spatialtree(object):
         '''
         Returns the height of the tree.
 
-        A tree with no children (a leaf) has height=0.
+        A tree with no children (a leaf) has height = 0.
         Otherwise, height = 1 + max(height(left child), height(right child))
         '''
         return self.__height
@@ -269,6 +357,7 @@ class spatialtree(object):
         Returns true if this tree is a leaf (no children)
         '''
         return self.__height == 0
+        #return self.__leafnum is not None
 
     def __len__(self):
         '''
@@ -334,7 +423,7 @@ class spatialtree(object):
 
         def __retrieveIndex(idx):
 
-            S = set()
+            S = {idx}#set()   #<- this will now return that index in set
         
             if idx in self.__indices:
                 if self.isLeaf():
@@ -367,7 +456,6 @@ class spatialtree(object):
                 if Wx < self.__thresholds[-1]:
                     S |= self.__children[0].retrievalSet(vector=vec)
                     pass
-
             return S
 
         if 'index' in kwargs:
@@ -376,6 +464,67 @@ class spatialtree(object):
             return __retrieveIndex(kwargs['index'])
         elif 'vector' in kwargs:
             return __retrieveVector(kwargs['vector'])
+
+        raise Exception('spatialtree.retrievalSet must be supplied with either an index or a data vector')
+        pass
+
+    def retrievalLeaf(self, **kwargs):
+        '''
+        S = T.retrievalLeaf(index = X, vector = X)
+        
+        Compute the leaf location for either a given query index or vector.
+
+        Exactly one of index or data must be supplied.
+
+        Note:
+        -----
+        If tree's spill parameter is not zero, idx and vector could return
+        different values
+        '''
+
+        def __retrieveLeafIndex(idx):
+
+            I = None
+        
+            if idx in self.__indices:
+                if self.isLeaf():
+                    I = self.__leafnum
+                else:
+                    for c in self.__children:
+                        if idx in c:
+                            I = c.retrievalLeaf(index = idx)
+                    pass
+                pass
+
+            return I
+
+        def __retrieveLeafVector(vec):
+
+            I = None
+    
+            # Did we land at a leaf?  Must be done
+            if self.isLeaf():
+                I = self.__leafnum
+            else:
+                Wx = numpy.dot(self.__w, vec)
+                # Should we go right?
+                if Wx >= self.__thresholds[0]: ## shouldn't this include spillage?
+                    I = self.__children[1].retrievalLeaf(vector=vec)
+                    pass
+
+                # Should we go left?
+                if Wx < self.__thresholds[-1]: ## shouldn't this include spillage?
+                    I = self.__children[0].retrievalLeaf(vector=vec)
+                    pass
+
+            return I
+
+        if 'index' in kwargs:
+            if kwargs['index'] not in self:
+                raise KeyError(kwargs['index'])
+            return __retrieveLeafIndex(kwargs['index'])
+        elif 'vector' in kwargs:
+            return __retrieveLeafVector(kwargs['vector'])
 
         raise Exception('spatialtree.retrievalSet must be supplied with either an index or a data vector')
         pass
@@ -575,7 +724,7 @@ class spatialtree(object):
         W   = numpy.random.randn( k, self.__d )
 
         # normalize each sample to get a sample from unit sphere
-        for i in xrange(k):
+        for i in range(k):
             W[i] /= numpy.sqrt(numpy.sum(W[i]**2))
             pass
 
@@ -591,6 +740,28 @@ class spatialtree(object):
             pass
 
         return W[numpy.argmax(max_val - min_val)]
+
+    # apply function (similar to sklearn rf.apply)
+
+    def apply(self, X):
+        '''
+        Apply tree to X, return leaf indices.
+        Parameters
+        ----------
+        X : array-like matrix, shape = [n_samples, n_features]
+            The input samples. 
+        Returns
+        -------
+        X_leaves : vector-like, shape = [n_samples,]
+            For each datapoint x in X returns the index of the leaf x ends up in.
+
+        '''
+        nrow = X.shape[0]
+        X_leaves = numpy.zeros(nrow,dtype = numpy.int)
+        for r_idx in range(nrow):
+            X_leaves[r_idx] = self.retrievalLeaf(vector = X[r_idx,])
+
+        return X_leaves
 
 # end spatialtree class
 
